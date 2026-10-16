@@ -4,9 +4,8 @@ pipeline {
 
     environment {
         REGISTRY_HOST = 'docker.io'
-
-        // Replace with your Docker Hub username/repository.
-        IMAGE_REPOSITORY = 'YOUR_DOCKERHUB_USERNAME/todo-app'
+        // Replace with your actual Docker Hub username.
+        IMAGE_REPOSITORY = 'arun2330/todo-app'
     }
 
     stages {
@@ -18,12 +17,13 @@ pipeline {
 
         stage('Unit Tests') {
             steps {
-                bat '''
-                    docker run --rm ^
-                      -v "%WORKSPACE%:/app" ^
-                      -w /app ^
-                      node:20-alpine ^
-                      sh -c "npm install && npm test"
+                sh '''
+                    set -eu
+                    docker run --rm \
+                      -v "$WORKSPACE:/app" \
+                      -w /app \
+                      node:20-alpine \
+                      sh -c 'if [ -f package-lock.json ]; then npm ci; else npm install; fi && npm test -- --runInBand'
                 '''
             }
         }
@@ -34,56 +34,55 @@ pipeline {
                     env.IMAGE = "${env.REGISTRY_HOST}/${env.IMAGE_REPOSITORY}:${env.BUILD_NUMBER}"
                 }
 
-                bat '''
-                    docker build -t "%IMAGE%" .
+                sh '''
+                    set -eu
+                    docker build -t "$IMAGE" .
                 '''
             }
         }
 
         stage('End-to-End Tests') {
             steps {
-                bat '''
-                    docker rm -f todo-e2e 2>NUL
-                    docker run -d --name todo-e2e -p 3100:3000 "%IMAGE%"
+                sh '''
+                    set -eu
+                    docker rm -f todo-e2e >/dev/null 2>&1 || true
+                    docker run -d --name todo-e2e \
+                      -p 3100:3000 "$IMAGE"
                 '''
 
                 script {
                     try {
-                        // Wait for the app to become healthy.
-                        powershell '''
-                            $ready = $false
+                        sh '''
+                            set -eu
+                            ready=false
 
-                            for ($i = 0; $i -lt 30; $i++) {
-                                try {
-                                    $response = Invoke-RestMethod `
-                                        -Uri "http://localhost:3100/health" `
-                                        -TimeoutSec 2
+                            for i in $(seq 1 30); do
+                                if curl -fsS http://localhost:3100/health >/dev/null; then
+                                    ready=true
+                                    break
+                                fi
+                                sleep 2
+                            done
 
-                                    if ($response.status -eq "ok") {
-                                        $ready = $true
-                                        break
-                                    }
-                                } catch {
-                                    Start-Sleep -Seconds 2
-                                }
-                            }
-
-                            if (-not $ready) {
+                            if [ "$ready" != true ]; then
                                 docker logs todo-e2e
-                                throw "Application did not become healthy"
-                            }
+                                echo "Application did not become ready"
+                                exit 1
+                            fi
                         '''
 
-                        bat '''
-                            docker run --rm ^
-                              -e BASE_URL=http://host.docker.internal:3100 ^
-                              -v "%WORKSPACE%:/app" ^
-                              -w /app ^
-                              node:20-alpine ^
-                              sh -c "npm install && npm run test:e2e"
+                        sh '''
+                            set -eu
+                            docker run --rm \
+                              --add-host=host.docker.internal:host-gateway \
+                              -e BASE_URL=http://host.docker.internal:3100 \
+                              -v "$WORKSPACE:/app" \
+                              -w /app \
+                              node:20-alpine \
+                              sh -c 'if [ -f package-lock.json ]; then npm ci; else npm install; fi && npm run test:e2e'
                         '''
                     } finally {
-                        bat 'docker rm -f todo-e2e 2>NUL'
+                        sh 'docker rm -f todo-e2e >/dev/null 2>&1 || true'
                     }
                 }
             }
@@ -101,14 +100,13 @@ pipeline {
                         passwordVariable: 'DOCKER_PASSWORD'
                     )
                 ]) {
-                    bat '''
-                        echo %DOCKER_PASSWORD% | docker login %REGISTRY_HOST% -u %DOCKER_USER% --password-stdin
-                        if errorlevel 1 exit /b 1
-
-                        docker push "%IMAGE%"
-                        if errorlevel 1 exit /b 1
-
-                        docker logout %REGISTRY_HOST%
+                    sh '''
+                        set -eu
+                        echo "$DOCKER_PASSWORD" |
+                          docker login "$REGISTRY_HOST" \
+                            --username "$DOCKER_USER" --password-stdin
+                        docker push "$IMAGE"
+                        docker logout "$REGISTRY_HOST"
                     '''
                 }
             }
@@ -125,28 +123,21 @@ pipeline {
                         variable: 'KUBECONFIG_FILE'
                     )
                 ]) {
-                    script {
-                        // Render the manifest with the exact image built above.
-                        powershell '''
-                            $yaml = Get-Content "k8s/deployment.yaml" -Raw
-                            $yaml = $yaml.Replace("__IMAGE__", $env:IMAGE)
-                            Set-Content -Path "k8s/deployment.rendered.yaml" `
-                                -Value $yaml -Encoding ascii
-                        '''
+                    sh '''
+                        set -eu
+                        sed "s|__IMAGE__|$IMAGE|g" \
+                          k8s/deployment.yaml \
+                          > k8s/deployment.rendered.yaml
 
-                        bat '''
-                            set "KUBECONFIG=%KUBECONFIG_FILE%"
-                            kubectl apply -f k8s/deployment.rendered.yaml
-                            if errorlevel 1 exit /b 1
+                        export KUBECONFIG="$KUBECONFIG_FILE"
 
-                            kubectl rollout status deployment/todo-app --timeout=180s
-                            if errorlevel 1 exit /b 1
-
-                            kubectl get deployments
-                            kubectl get pods
-                            kubectl get services
-                        '''
-                    }
+                        kubectl apply -f k8s/deployment.rendered.yaml
+                        kubectl rollout status deployment/todo-app \
+                          --timeout=180s
+                        kubectl get deployments
+                        kubectl get pods
+                        kubectl get services
+                    '''
                 }
             }
         }
@@ -154,7 +145,7 @@ pipeline {
 
     post {
         always {
-            bat 'docker rm -f todo-e2e 2>NUL'
+            sh 'docker rm -f todo-e2e >/dev/null 2>&1 || true'
             echo 'Pipeline finished. Check the stage results above.'
         }
     }

@@ -1,37 +1,39 @@
 
-const test = require('node:test');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const baseUrl = process.env.BASE_URL || 'http://localhost:3100';
+const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
 
 test('application health endpoint responds successfully', async () => {
-  const response = await fetch(`${baseUrl}/health`);
+  const response = await fetch(`${BASE_URL}/health`);
 
   assert.equal(response.status, 200);
-
-  const body = await response.json();
-  assert.equal(body.status, 'ok');
+  assert.deepEqual(await response.json(), { status: 'ok' });
 });
 
-test('application creates and deletes a TODO', async () => {
-  const title = `E2E flight check ${Date.now()}`;
-
-  const createResponse = await fetch(`${baseUrl}/api/todos`, {
+test('TODO API creates, toggles, and deletes a task', async () => {
+  const created = await fetch(`${BASE_URL}/api/todos`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title })
+    body: JSON.stringify({ title: 'Validate runway inspection' })
   });
 
-  assert.equal(createResponse.status, 201);
-
-  const todo = await createResponse.json();
-  assert.equal(todo.title, title);
+  assert.equal(created.status, 201);
+  const todo = await created.json();
+  assert.equal(todo.title, 'Validate runway inspection');
   assert.equal(todo.done, false);
 
-  const deleteResponse = await fetch(
-    `${baseUrl}/api/todos/${todo.id}`,
-    { method: 'DELETE' }
+  const toggled = await fetch(
+    `${BASE_URL}/api/todos/${todo.id}/toggle`,
+    { method: 'PUT' }
   );
 
-  assert.equal(deleteResponse.status, 204);
+  assert.equal(toggled.status, 200);
+  assert.equal((await toggled.json()).done, true);
+
+  const deleted = await fetch(`${BASE_URL}/api/todos/${todo.id}`, {
+    method: 'DELETE'
+  });
+
+  assert.equal(deleted.status, 204);
 });
